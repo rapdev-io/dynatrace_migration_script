@@ -28,7 +28,7 @@ _RETRY_BASE_DELAY = 2.0
 
 
 def _default_transport(request: Request):
-    return urlopen(request, timeout=60)
+    return urlopen(request, timeout=60)  # nosec B310 — URLs are env-configured API endpoints, not user input
 
 
 def _is_retryable(exc: Exception) -> bool:
