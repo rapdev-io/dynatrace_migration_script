@@ -56,8 +56,6 @@ def _placeholder_query(query: QueryRecord, definition_type: str) -> str:
     family = query.query_family
     if family == "ddsql":
         # DDSQL is Datadog-native; use a generic table placeholder that still compiles
-        if definition_type == "query_table":
-            return "SELECT host, AVG(system.cpu.user) FROM metrics GROUP BY host"
         return "SELECT host, AVG(system.cpu.user) FROM metrics GROUP BY host"
     if family == "datadog_metric":
         # Source already uses Datadog metric syntax — mirror the structure
@@ -66,15 +64,9 @@ def _placeholder_query(query: QueryRecord, definition_type: str) -> str:
             return f"{base} by {{host}}"
         return base
     if family == "datadog_logs":
-        if definition_type == "query_table":
-            return "logs(\"service:*\").index(\"*\").rollup(\"count\").last(\"15m\")"
         return "logs(\"service:*\").index(\"*\").rollup(\"count\").last(\"15m\")"
-    if family == "dynatrace_dql":
-        # DQL cannot be used in Datadog; placeholder makes the gap explicit
-        if definition_type == "query_table":
-            return "# TRANSLATE: avg:custom.metric{*} by {host}"
-        return "# TRANSLATE: avg:custom.metric{*}"
-    if family == "sql_like":
+    if family in {"dynatrace_dql", "sql_like"}:
+        # DQL/USQL cannot be used in Datadog; placeholder makes the gap explicit
         if definition_type == "query_table":
             return "# TRANSLATE: avg:custom.metric{*} by {host}"
         return "# TRANSLATE: avg:custom.metric{*}"

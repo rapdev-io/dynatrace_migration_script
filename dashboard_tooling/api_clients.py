@@ -31,12 +31,6 @@ def _default_transport(request: Request):
     return urlopen(request, timeout=60)  # nosec B310 — URLs are env-configured API endpoints, not user input
 
 
-def _is_retryable(exc: Exception) -> bool:
-    if isinstance(exc, HTTPError):
-        return exc.code == 429 or exc.code >= 500
-    return True  # network / timeout errors are retryable
-
-
 def _retry_delay(exc: Exception, attempt: int) -> float:
     if isinstance(exc, HTTPError) and exc.code == 429:
         retry_after = exc.headers.get("Retry-After")
@@ -60,10 +54,11 @@ class JsonHttpClient:
                     return response.read().decode("utf-8")
             except HTTPError as exc:
                 if exc.code == 429:
-                    delay = _retry_delay(exc, attempt)
-                    time.sleep(delay)
-                    last_exc = exc
-                    continue
+                    if attempt < _MAX_RETRIES - 1:
+                        time.sleep(_retry_delay(exc, attempt))
+                        last_exc = exc
+                        continue
+                    raise RateLimitError(f"rate limited after {_MAX_RETRIES} attempts for {url}") from exc
                 if exc.code >= 500 and attempt < _MAX_RETRIES - 1:
                     time.sleep(_retry_delay(exc, attempt))
                     last_exc = exc
