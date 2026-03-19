@@ -16,16 +16,30 @@ def normalize_title(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
 
 
-def query_family(query_text: str) -> str:
-    lowered = query_text.lower()
-    if "select " in lowered:
-        return "sql_like"
-    if "timeseries " in lowered or "fetch " in lowered:
+def query_family(query_text: str, source_system: str = "") -> str:
+    # Strip single-line and block comments before classifying to avoid matching
+    # keywords that appear only in comment text (e.g. "// timeseries" or "-- select").
+    stripped = re.sub(r"(--[^\n]*|//[^\n]*|/\*.*?\*/)", " ", query_text, flags=re.DOTALL).lower().strip()
+
+    # SQL-shaped query (SELECT ... FROM): the family depends on origin.
+    # - Dynatrace USQL (user sessions query language) looks like SQL but targets DT data.
+    # - Datadog DDSQL is Datadog-native and does not require translation.
+    # Both are flagged separately so downstream logic can treat them correctly.
+    if re.search(r"\bselect\b.+\bfrom\b", stripped, re.DOTALL):
+        return "ddsql" if source_system == "datadog" else "sql_like"
+
+    # Dynatrace DQL: timeseries or fetch must appear at the start of a statement
+    if re.search(r"(?:^|;|\|)\s*(?:timeseries|fetch)\b", stripped):
         return "dynatrace_dql"
-    if "avg:" in lowered or "sum:" in lowered or "anomalies(" in lowered:
+
+    # Datadog metric query syntax: metric selectors use colon notation
+    if re.search(r"\b(?:avg|sum|min|max|count):[a-z]", stripped) or "anomalies(" in stripped:
         return "datadog_metric"
-    if "logs(" in lowered or "service:" in lowered or "@http." in lowered:
+
+    # Datadog log/trace query syntax
+    if "logs(" in stripped or re.search(r"service:[a-z\-_*]", stripped) or "@http." in stripped:
         return "datadog_logs"
+
     return "unknown"
 
 
@@ -56,6 +70,7 @@ def _append_query(
     widget_title: str,
     widget_type: str,
     query_text: str,
+    source_system: str = "",
 ) -> None:
     cleaned = str(query_text).strip()
     if not cleaned:
@@ -68,7 +83,7 @@ def _append_query(
             widget_title=widget_title,
             widget_type=widget_type,
             query_text=cleaned,
-            query_family=query_family(cleaned),
+            query_family=query_family(cleaned, source_system),
             heuristic_signals=[],
         )
     )
@@ -135,6 +150,7 @@ def normalize_dynatrace_dashboards(payload: object) -> list[DashboardRecord]:
                             widget_title=widget_title,
                             widget_type=widget_type,
                             query_text=str(item),
+                            source_system="dynatrace",
                         )
                 elif path:
                     _append_query(
@@ -143,6 +159,7 @@ def normalize_dynatrace_dashboards(payload: object) -> list[DashboardRecord]:
                         widget_title=widget_title,
                         widget_type=widget_type,
                         query_text=str(path),
+                        source_system="dynatrace",
                     )
 
             if isinstance(widget.get("markdown"), str):
@@ -152,6 +169,7 @@ def normalize_dynatrace_dashboards(payload: object) -> list[DashboardRecord]:
                     widget_title=widget_title,
                     widget_type=widget_type,
                     query_text=str(widget["markdown"]),
+                    source_system="dynatrace",
                 )
 
         dashboard.widget_types = sorted(type_counter)
@@ -220,6 +238,7 @@ def normalize_datadog_dashboards(payload: object) -> list[DashboardRecord]:
                             widget_title=widget_title,
                             widget_type=widget_type,
                             query_text=str(request["q"]),
+                            source_system="datadog",
                         )
                     formulas = request.get("formulas")
                     if isinstance(formulas, list):
@@ -231,6 +250,7 @@ def normalize_datadog_dashboards(payload: object) -> list[DashboardRecord]:
                                     widget_title=widget_title,
                                     widget_type=widget_type,
                                     query_text=str(formula["formula"]),
+                                    source_system="datadog",
                                 )
             if definition.get("query"):
                 _append_query(
@@ -239,6 +259,7 @@ def normalize_datadog_dashboards(payload: object) -> list[DashboardRecord]:
                     widget_title=widget_title,
                     widget_type=widget_type,
                     query_text=str(definition["query"]),
+                    source_system="datadog",
                 )
 
         dashboard.widget_types = sorted(type_counter)

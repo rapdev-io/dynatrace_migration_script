@@ -2,8 +2,19 @@ from __future__ import annotations
 
 from difflib import SequenceMatcher
 
+from dashboard_tooling.heuristics import COMPLEXITY_BLOCKER_THRESHOLD
 from dashboard_tooling.models import DashboardRecord, ParityRecord
 from dashboard_tooling.normalize import normalize_title
+
+# SequenceMatcher ratio thresholds for dashboard title matching.
+# STRONG (0.92): titles that differ only by minor word reordering or punctuation
+#   e.g. "Service Latency Overview" vs "Service Latency - Overview"
+# WEAK (0.72): titles that share most tokens but have one meaningful difference
+#   e.g. "Host CPU Usage" vs "Host Memory Usage" — useful for flagging candidates,
+#   not for automatic matching.
+# Values below WEAK are treated as no match (missing_in_target).
+DEFAULT_STRONG_MATCH_THRESHOLD: float = 0.92
+DEFAULT_WEAK_MATCH_THRESHOLD: float = 0.72
 
 
 def _title_similarity(left: str, right: str) -> float:
@@ -14,8 +25,8 @@ def compare_dashboards(
     source_dashboards: list[DashboardRecord],
     target_dashboards: list[DashboardRecord],
     *,
-    strong_match_threshold: float = 0.92,
-    weak_match_threshold: float = 0.72,
+    strong_match_threshold: float = DEFAULT_STRONG_MATCH_THRESHOLD,
+    weak_match_threshold: float = DEFAULT_WEAK_MATCH_THRESHOLD,
 ) -> list[ParityRecord]:
     parity_records: list[ParityRecord] = []
     for source in source_dashboards:
@@ -56,7 +67,7 @@ def compare_dashboards(
 
         if source.query_count == 0:
             record.manual_review_reasons.append("source_needs_manual_query_capture")
-        if source.complexity_score >= 12:
+        if source.complexity_score >= COMPLEXITY_BLOCKER_THRESHOLD:
             record.manual_review_reasons.append("high_complexity")
         if source.variables and not best_target:
             record.heuristic_blockers.append("dynamic_filter_mapping_required")

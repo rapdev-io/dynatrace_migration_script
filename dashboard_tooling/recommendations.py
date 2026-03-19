@@ -4,6 +4,36 @@ from collections import Counter
 
 from dashboard_tooling.models import DashboardRecommendation, DashboardRecord
 
+# Minimum value_score to consider a dashboard worth building
+VALUE_BUILD_THRESHOLD = 5
+# Minimum value_score to keep a dashboard as a candidate pending answers
+VALUE_CANDIDATE_THRESHOLD = 4
+
+# Base automation score before penalties; represents a dashboard with no known blockers
+AUTOMATION_SCORE_BASE = 8
+
+# Penalty weights — calibrated so that the three manual-only signals (all 4-pt
+# blockers together) push the score below the high-confidence threshold of 6,
+# while single soft blockers (1 pt) still allow automation-assisted workflows.
+AUTOMATION_PENALTIES: dict[str, int] = {
+    "translation_review_required": 1,    # DQL/SQL present; mapping work needed but automatable
+    "custom_logic_dependency": 2,         # CASE/COALESCE/window logic; likely needs redesign
+    "multi_stage_query_logic": 2,         # JOINs/UNIONs; Datadog has no equivalent primitives
+    "dynamic_filter_dependency": 1,       # Template variables exist; mapping needed but low risk
+    "table_or_list_result_shaping": 1,    # Table widgets; layout parity may need manual review
+    "textual_context_dependency": 1,      # Markdown notes; content must be reviewed manually
+    "manual_query_capture_required": 4,   # No query payload at all; cannot automate without input
+    "high_complexity_dashboard": 2,       # Complexity score >= threshold; risk of missed signals
+}
+
+# Automation score thresholds:
+# >= HIGH  → Terraform-ready; no manual query work required
+# >= MED   → Terraform possible after query mapping
+# <  MED   → Manual design first; automation not viable yet
+AUTOMATION_HIGH_THRESHOLD = 6
+AUTOMATION_MED_THRESHOLD = 4
+
+
 
 VALUE_KEYWORDS: dict[str, str] = {
     "overview": "service_health",
@@ -91,21 +121,11 @@ def _value_score(dashboard: DashboardRecord, tier: str) -> tuple[int, list[str],
 
 def _automation_score(dashboard: DashboardRecord) -> tuple[int, bool, str, list[str], list[str], str]:
     blockers = set(dashboard.heuristic_blockers) | set(dashboard.annotation_blockers)
-    score = 8
+    score = AUTOMATION_SCORE_BASE
     required_inputs: list[str] = []
     open_questions: list[str] = []
 
-    penalties = {
-        "translation_review_required": 1,
-        "custom_logic_dependency": 2,
-        "multi_stage_query_logic": 2,
-        "dynamic_filter_dependency": 1,
-        "table_or_list_result_shaping": 1,
-        "textual_context_dependency": 1,
-        "manual_query_capture_required": 4,
-        "high_complexity_dashboard": 2,
-    }
-    for blocker, penalty in penalties.items():
+    for blocker, penalty in AUTOMATION_PENALTIES.items():
         if blocker in blockers:
             score -= penalty
 
@@ -138,11 +158,11 @@ def _automation_score(dashboard: DashboardRecord) -> tuple[int, bool, str, list[
         open_questions.append("Which ownership and scope tags should be applied in Datadog?")
 
     score = max(score, 0)
-    if score >= 6 and "manual_query_capture_required" not in blockers:
+    if score >= AUTOMATION_HIGH_THRESHOLD and "manual_query_capture_required" not in blockers:
         terraform_strategy = "terraform_dashboard_json"
         terraform_ready = True
         confidence = "high"
-    elif score >= 4:
+    elif score >= AUTOMATION_MED_THRESHOLD:
         terraform_strategy = "terraform_after_query_mapping"
         terraform_ready = False
         confidence = "medium"
@@ -200,9 +220,9 @@ def recommend_dashboard(dashboard: DashboardRecord) -> DashboardRecommendation:
         confidence,
     ) = _automation_score(dashboard)
 
-    if value_score >= 5 and terraform_ready:
+    if value_score >= VALUE_BUILD_THRESHOLD and terraform_ready:
         status = "create_with_terraform"
-    elif value_score >= 4:
+    elif value_score >= VALUE_CANDIDATE_THRESHOLD:
         status = "candidate_pending_answers"
     elif dashboard.query_count == 0:
         status = "defer_missing_signal"

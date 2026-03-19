@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Callable
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -13,27 +15,74 @@ class ApiClientError(RuntimeError):
     pass
 
 
+class RateLimitError(ApiClientError):
+    pass
+
+
 Transport = Callable[[Request], object]
+
+# Number of retries on transient failures (5xx, network errors, rate limits)
+_MAX_RETRIES = 3
+# Seconds to wait between retries; doubled each attempt
+_RETRY_BASE_DELAY = 2.0
 
 
 def _default_transport(request: Request):
     return urlopen(request, timeout=60)
 
 
+def _is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, HTTPError):
+        return exc.code == 429 or exc.code >= 500
+    return True  # network / timeout errors are retryable
+
+
+def _retry_delay(exc: Exception, attempt: int) -> float:
+    if isinstance(exc, HTTPError) and exc.code == 429:
+        retry_after = exc.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return float(retry_after)
+            except ValueError:
+                pass
+    return _RETRY_BASE_DELAY * (2 ** attempt)
+
+
 @dataclass
 class JsonHttpClient:
     transport: Transport = _default_transport
+
+    def _execute(self, request: Request, url: str) -> str:
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                with self.transport(request) as response:
+                    return response.read().decode("utf-8")
+            except HTTPError as exc:
+                if exc.code == 429:
+                    delay = _retry_delay(exc, attempt)
+                    time.sleep(delay)
+                    last_exc = exc
+                    continue
+                if exc.code >= 500 and attempt < _MAX_RETRIES - 1:
+                    time.sleep(_retry_delay(exc, attempt))
+                    last_exc = exc
+                    continue
+                raise ApiClientError(f"HTTP {exc.code} for {url}: {exc.reason}") from exc
+            except Exception as exc:  # pragma: no cover
+                if attempt < _MAX_RETRIES - 1:
+                    time.sleep(_retry_delay(exc, attempt))
+                    last_exc = exc
+                    continue
+                raise ApiClientError(f"request failed for {url}: {exc}") from exc
+        raise ApiClientError(f"request failed after {_MAX_RETRIES} attempts for {url}: {last_exc}") from last_exc
 
     def get_json(self, url: str, headers: dict[str, str], *, query: dict[str, str] | None = None) -> object:
         final_url = url
         if query:
             final_url = f"{url}?{urlencode(query, doseq=True)}"
         request = Request(final_url, headers=headers, method="GET")
-        try:
-            with self.transport(request) as response:
-                payload = response.read().decode("utf-8")
-        except Exception as exc:  # pragma: no cover
-            raise ApiClientError(f"request failed for {final_url}: {exc}") from exc
+        payload = self._execute(request, final_url)
         try:
             return json.loads(payload)
         except json.JSONDecodeError as exc:
@@ -46,11 +95,7 @@ class JsonHttpClient:
             payload_bytes = json.dumps(body).encode("utf-8")
             request_headers.setdefault("Content-Type", "application/json")
         request = Request(url, headers=request_headers, data=payload_bytes, method=method)
-        try:
-            with self.transport(request) as response:
-                payload = response.read().decode("utf-8")
-        except Exception as exc:  # pragma: no cover
-            raise ApiClientError(f"request failed for {url}: {exc}") from exc
+        payload = self._execute(request, url)
         try:
             return json.loads(payload)
         except json.JSONDecodeError as exc:
