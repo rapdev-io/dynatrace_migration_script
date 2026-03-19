@@ -1,0 +1,285 @@
+name: Unified DevSecOps
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: unified-devsecops-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+
+env:
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  repo-hygiene:
+    name: Repo Hygiene
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Compile Python sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall dashboard_tooling scripts tests
+
+      - name: Run unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s tests -p 'test_*.py'
+
+  fixture-smoke:
+    name: Fixture Smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Build synthetic smoke inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp/smoke
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          dynatrace_payload = {
+              "dashboards": [
+                  {
+                      "id": "dt-smoke-1",
+                      "name": "Executive KPI Overview",
+                      "dashboardFilter": {"variables": ["Environment", "Service"]},
+                      "tiles": [
+                          {
+                              "name": "Latency",
+                              "tileType": "TABLE",
+                              "query": "SELECT service, avg(duration) FROM spans JOIN services ON spans.service_id = services.id",
+                          }
+                      ],
+                  }
+              ]
+          }
+          datadog_payload = {
+              "dashboards": [
+                  {
+                      "id": "dd-smoke-1",
+                      "title": "Executive KPI Overview",
+                      "widgets": [
+                          {
+                              "definition": {
+                                  "type": "timeseries",
+                                  "title": "Latency",
+                                  "requests": [{"q": "avg:trace.http.request.duration{service:ecommerce}"}],
+                              }
+                          }
+                      ],
+                  }
+              ]
+          }
+          Path(".tmp/smoke/dynatrace_raw.json").write_text(json.dumps(dynatrace_payload, indent=2), encoding="utf-8")
+          Path(".tmp/smoke/datadog_raw.json").write_text(json.dumps(datadog_payload, indent=2), encoding="utf-8")
+          PY
+
+      - name: Normalize source and target inventories
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/normalize_dashboards.py \
+            --source dynatrace \
+            --input .tmp/smoke/dynatrace_raw.json \
+            --out-dir .tmp/smoke/dynatrace
+          python scripts/normalize_dashboards.py \
+            --source datadog \
+            --input .tmp/smoke/datadog_raw.json \
+            --out-dir .tmp/smoke/datadog
+
+      - name: Compare inventories and generate review scaffolds
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/compare_dashboards.py \
+            --source-inventory .tmp/smoke/dynatrace/inventory.json \
+            --target-inventory .tmp/smoke/datadog/inventory.json \
+            --out-dir .tmp/smoke/parity
+          python scripts/generate_review_scaffolds.py \
+            --source-inventory .tmp/smoke/dynatrace/inventory.json \
+            --parity-json .tmp/smoke/parity/parity.json \
+            --out-dir .tmp/smoke/review \
+            --status-filter exact_title_match,missing_in_target,possible_candidate,high_confidence_candidate
+
+      - name: Upload smoke artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-artifacts
+          path: .tmp/smoke
+
+  static-security:
+    name: Static Security
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Bandit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install bandit
+
+      - name: Run Bandit
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp/security
+          python -m bandit -q -r dashboard_tooling scripts -f json -o .tmp/security/bandit.json
+
+      - name: Upload static security results
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-security-results
+          path: .tmp/security
+
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Run pip-audit when dependency manifests exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp/deps
+          if [ -f requirements.txt ]; then
+            python -m pip install --upgrade pip
+            python -m pip install pip-audit
+            python -m pip_audit -r requirements.txt -f json -o .tmp/deps/pip-audit.json
+          elif ls requirements*.txt >/dev/null 2>&1; then
+            python -m pip install --upgrade pip
+            python -m pip install pip-audit
+            first_manifest="$(ls requirements*.txt | sort | head -n 1)"
+            python -m pip_audit -r "$first_manifest" -f json -o .tmp/deps/pip-audit.json
+          elif [ -f pyproject.toml ]; then
+            python -m pip install --upgrade pip
+            python -m pip install pip-audit
+            python -m pip_audit -f json -o .tmp/deps/pip-audit.json
+          else
+            printf '{\n  "status": "skipped",\n  "reason": "no dependency manifest present"\n}\n' > .tmp/deps/pip-audit.json
+          fi
+
+      - name: Upload dependency audit results
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-audit-results
+          path: .tmp/deps
+
+  quality-gate:
+    name: Quality Gate
+    runs-on: ubuntu-24.04
+    needs:
+      - repo-hygiene
+      - fixture-smoke
+      - static-security
+      - secret-scan
+      - dependency-audit
+    steps:
+      - name: Confirm all prerequisite jobs passed
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "All parallel verification jobs passed. Proceeding to serialized packaging."
+
+  package:
+    name: Package Artifacts
+    runs-on: ubuntu-24.04
+    needs:
+      - quality-gate
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Create source package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar \
+            --exclude='.git' \
+            --exclude='.venv' \
+            --exclude='__pycache__' \
+            -czf dist/dashboard-tooling-src.tgz \
+            dashboard_tooling scripts tests .github/workflows
+
+      - name: Upload packaged source
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaged-source
+          path: dist/dashboard-tooling-src.tgz
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    needs:
+      - package
+    permissions:
+      contents: write
+    steps:
+      - name: Download packaged source
+        uses: actions/download-artifact@v4
+        with:
+          name: packaged-source
+          path: dist
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/dashboard-tooling-src.tgz
