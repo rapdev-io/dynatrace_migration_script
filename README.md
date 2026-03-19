@@ -483,11 +483,8 @@ Outputs:
 5. Use Terraform plans to structure implementation and identify missing query mappings.
 6. Translate source queries into real Datadog telemetry before applying Terraform.
 
-## Publication Notes
+## Access and Use
 
-This repo is close to public-ready from a content perspective, but two publication decisions still remain:
-- decide whether to publish example fixtures or keep users responsible for supplying their own exports
+This is a private repository. Access is restricted to authorized team members. Do not share, redistribute, or republish any part of this codebase outside of authorized channels.
 
-## License Status
-
-No license file has been added. Unless and until a license is added, this repository should be treated as published source code without an open-source license grant.
+All rights reserved.
