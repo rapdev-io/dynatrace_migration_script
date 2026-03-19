@@ -22,7 +22,8 @@ def _group_queries(dashboard: DashboardRecord) -> list[QueryRecord]:
 
 def _suggest_definition_type(query: QueryRecord) -> str:
     widget_type = query.widget_type.lower()
-    if "table" in widget_type or query.query_family == "sql_like":
+    # sql_like (Dynatrace USQL) and ddsql (Datadog DDSQL) both return tabular results
+    if "table" in widget_type or query.query_family in {"sql_like", "ddsql"}:
         return "query_table"
     if "markdown" in widget_type or "note" in widget_type:
         return "note"
@@ -37,15 +38,41 @@ def _mapping_status(query: QueryRecord) -> tuple[str, list[str]]:
     if query.query_family in {"dynatrace_dql", "sql_like"}:
         notes.append("Translate the source query to Datadog-native telemetry before applying Terraform.")
         return "query_translation_required", notes
+    # ddsql is Datadog's own SQL dialect — no translation needed, but semantics must be validated
+    if query.query_family == "ddsql":
+        notes.append("DDSQL is Datadog-native; validate query semantics and table scoping before apply.")
+        return "validate_and_apply", notes
     notes.append("Query family already resembles Datadog syntax; validate semantics before apply.")
     return "validate_and_apply", notes
 
 
 def _placeholder_query(query: QueryRecord, definition_type: str) -> str:
-    if definition_type == "query_table":
-        return "avg:system.load.1{*} by {host}"
+    # Notes have no query — return empty and let the draft widget use source text as context.
     if definition_type == "note":
         return ""
+    # Use the query family to hint at a more semantically relevant placeholder.
+    # All placeholders are clearly synthetic; the mapping_status field tells the
+    # engineer whether translation work is required before applying Terraform.
+    family = query.query_family
+    if family == "ddsql":
+        # DDSQL is Datadog-native; use a generic table placeholder that still compiles
+        return "SELECT host, AVG(system.cpu.user) FROM metrics GROUP BY host"
+    if family == "datadog_metric":
+        # Source already uses Datadog metric syntax — mirror the structure
+        base = "avg:system.cpu.user{*}"
+        if definition_type == "query_table":
+            return f"{base} by {{host}}"
+        return base
+    if family == "datadog_logs":
+        return "logs(\"service:*\").index(\"*\").rollup(\"count\").last(\"15m\")"
+    if family in {"dynatrace_dql", "sql_like"}:
+        # DQL/USQL cannot be used in Datadog; placeholder makes the gap explicit
+        if definition_type == "query_table":
+            return "# TRANSLATE: avg:custom.metric{*} by {host}"
+        return "# TRANSLATE: avg:custom.metric{*}"
+    # unknown family — generic placeholder, table variant groups by host
+    if definition_type == "query_table":
+        return "avg:system.load.1{*} by {host}"
     return "avg:system.load.1{*}"
 
 

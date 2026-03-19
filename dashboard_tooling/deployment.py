@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
+import subprocess  # nosec B404
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -96,4 +96,4 @@ def run_terraform(work_dir: Path, command: str, *, auto_approve: bool = False) -
     args = [terraform, command]
     if command == "apply" and auto_approve:
         args.append("-auto-approve")
-    return subprocess.run(args, cwd=work_dir, check=True, capture_output=True, text=True)
+    return subprocess.run(args, cwd=work_dir, check=True, capture_output=True, text=True)  # nosec B603

@@ -232,5 +232,54 @@ class DashboardToolingTests(unittest.TestCase):
         self.assertTrue(plans[0].import_instructions)
 
 
+    def test_ddsql_not_flagged_for_translation(self) -> None:
+        # A Datadog dashboard with a DDSQL query should be classified as "ddsql",
+        # not "sql_like", and must not receive a translation_review_required signal.
+        payload = {
+            "dashboards": [
+                {
+                    "id": "dd-sql",
+                    "title": "Cost Overview",
+                    "widgets": [
+                        {
+                            "definition": {
+                                "type": "query_table",
+                                "title": "Cost by Service",
+                                "requests": [{"q": "SELECT service, SUM(cost) FROM usage GROUP BY service"}],
+                            }
+                        }
+                    ],
+                }
+            ]
+        }
+        dashboards = normalize_datadog_dashboards(payload)
+        query = dashboards[0].queries[0]
+        self.assertEqual(query.query_family, "ddsql")
+        self.assertNotIn("translation_review_required", query.heuristic_signals)
+
+    def test_dynatrace_usql_still_flagged_for_translation(self) -> None:
+        # A Dynatrace dashboard with a USQL query must remain "sql_like" and
+        # receive translation_review_required since it targets DT data.
+        payload = {
+            "dashboards": [
+                {
+                    "id": "dt-sql",
+                    "name": "Session Overview",
+                    "tiles": [
+                        {
+                            "name": "Sessions",
+                            "tileType": "TABLE",
+                            "query": "SELECT usersession.userType, COUNT(*) FROM usersession GROUP BY usersession.userType",
+                        }
+                    ],
+                }
+            ]
+        }
+        dashboards = normalize_dynatrace_dashboards(payload)
+        query = dashboards[0].queries[0]
+        self.assertEqual(query.query_family, "sql_like")
+        self.assertIn("translation_review_required", query.heuristic_signals)
+
+
 if __name__ == "__main__":
     unittest.main()
